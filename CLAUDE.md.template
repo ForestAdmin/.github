@@ -1,0 +1,54 @@
+# CLAUDE.md — Template
+
+> Copy this file to the root of each repo and customize the sections below.
+
+## Package management
+
+- Package manager: yarn (v1)
+- Install: `yarn install --frozen-lockfile`
+- Add dependency: `yarn add <package>`
+- Lockfile: `yarn.lock` (always commit changes after dependency bumps)
+- This is a monorepo using yarn workspaces
+
+## Code quality
+
+- Lint: `yarn lint`
+- Lint fix: `yarn lint:fix`
+- Format check: `yarn format`
+- Format fix: `yarn format:write`
+
+## Testing
+
+- Run all tests: `yarn test`
+- Run tests in CI mode: `yarn test:ci` (if available)
+
+## Git conventions
+
+- Branch naming for security fixes: `security/fix-<package>-<cve-id>`
+- Commit style: conventional commits
+  - Example: `fix(deps): bump lodash to 4.17.21 [CVE-2021-23337]`
+- PRs for security fixes must have the `security` label
+
+## Dependency bumps
+
+- **CRITICAL**: Before bumping, always read the CHANGELOG / release notes between the
+  current and target version. Even minor/patch bumps can introduce behavioral changes
+  (e.g. stricter defaults, changed parsing, new validation rules) that break production
+  without failing tests.
+- After bumping, always regenerate the lockfile with `yarn install`
+- Always run the full test suite after a bump, not just affected tests
+- In a monorepo, check if the bumped package is used in multiple workspaces
+- If tests pass, assess whether the behavioral changes you found in the changelog are
+  actually covered by existing tests. Flag any uncovered changes in the PR description
+  under a "Behavioral changes to verify manually" section.
+- Prefer the smallest version bump that resolves the issue
+- If tests fail due to breaking changes, attempt to fix them
+- If breaking changes cannot be resolved, document them clearly in the PR description
+
+## Repository-specific notes
+
+<!-- Add anything specific to this repo below -->
+<!-- Examples: -->
+<!-- - This repo uses Sequelize ORM — watch for breaking changes in DB adapters -->
+<!-- - Integration tests require a running PostgreSQL instance -->
+<!-- - Some tests are flaky in CI — retry once before reporting failure -->

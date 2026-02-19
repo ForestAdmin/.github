@@ -1,0 +1,58 @@
+# forestadmin/.github/.github/workflows/notify-downstream.yml
+#
+# Reusable workflow: notify downstream repos when a security fix is merged.
+# Triggers the retry-upstream-vulnerabilities workflow in each downstream repo
+# so they can immediately check if the upstream fix resolves their blocked issues,
+# instead of waiting for the daily cron.
+#
+# Requires a CROSS_REPO_TOKEN secret (PAT or GitHub App token) with permissions
+# to trigger workflows in the downstream repos.
+
+name: Notify downstream repos (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      downstream_repos:
+        description: "JSON array of downstream repo names (within the same org), e.g. '[\"forestadmin-server\"]'"
+        type: string
+        required: true
+      org:
+        description: "GitHub org that owns the downstream repos"
+        type: string
+        default: "forestadmin"
+    secrets:
+      CROSS_REPO_TOKEN:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ${{ fromJson(inputs.downstream_repos) }}
+      fail-fast: false
+    steps:
+      - name: Trigger retry workflow in downstream repo
+        uses: actions/github-script@v7
+        env:
+          REPO: ${{ matrix.repo }}
+          ORG: ${{ inputs.org }}
+          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+        with:
+          github-token: ${{ secrets.CROSS_REPO_TOKEN }}
+          script: |
+            const org = process.env.ORG;
+            const repo = process.env.REPO;
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: org,
+                repo: repo,
+                workflow_id: 'security-retry-upstream.yml',
+                ref: 'main',
+              });
+              core.info(`Triggered retry workflow in ${org}/${repo}`);
+            } catch (error) {
+              core.warning(`Failed to notify ${org}/${repo}: ${error.message}`);
+            }

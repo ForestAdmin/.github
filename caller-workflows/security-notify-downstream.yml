@@ -1,0 +1,33 @@
+# Copy this file to each repo that has downstream dependents:
+#   .github/workflows/security-notify-downstream.yml
+#
+# When a security PR is merged, notifies downstream repos to immediately
+# retry their blocked-upstream issues instead of waiting for the daily cron.
+#
+# Requires:
+#   - CROSS_REPO_TOKEN secret (PAT or GitHub App token with actions:write
+#     on downstream repos)
+#   - Customize downstream_repos for each repo (see below)
+
+name: Notify downstream of security fix
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  notify:
+    if: >
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'security')
+    uses: forestadmin/.github/.github/workflows/notify-downstream.yml@main
+    with:
+      # Configure downstream repos that depend on this repo's packages.
+      # Examples:
+      #   agent-nodejs → forestadmin-server depends on @forestadmin/* packages
+      #   forestadmin-server → (none currently)
+      downstream_repos: '[]'
+      # Uncomment and set for your repo, e.g.:
+      # downstream_repos: '["forestadmin-server"]'
+    secrets:
+      CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}

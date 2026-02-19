@@ -1,0 +1,388 @@
+# forestadmin/.github/.github/workflows/retry-upstream-vulnerabilities.yml
+#
+# Reusable workflow: daily check for upstream fixes on blocked vulnerabilities.
+# Scans open "blocked-upstream" issues, checks if the Forest Admin parent
+# package has a new version that resolves the vulnerability, and if so,
+# triggers Claude Code to bump + open a PR.
+
+name: Retry blocked upstream vulnerabilities (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      forest_package_patterns:
+        description: "Regex to identify org-owned packages"
+        type: string
+        default: "@forestadmin/|^forest-"
+      default_assignee_team:
+        description: "Team or user to assign PRs to"
+        type: string
+        default: "forestadmin/platform"
+      node_version:
+        description: "Node.js version"
+        type: string
+        default: "22"
+      package_manager:
+        description: "Package manager (auto-detected from lockfile if omitted). Values: npm, yarn"
+        type: string
+        default: ""
+      stale_days:
+        description: "Days before an issue is considered stale (for notifications)"
+        type: number
+        default: 14
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Step 1: Find all open blocked-upstream issues
+  # ──────────────────────────────────────────────
+  find-issues:
+    runs-on: ubuntu-latest
+    outputs:
+      issues: ${{ steps.find.outputs.issues }}
+      has_issues: ${{ steps.find.outputs.has_issues }}
+    steps:
+      - name: Find blocked upstream issues
+        id: find
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'security,blocked-upstream',
+              state: 'open',
+              per_page: 50,
+            });
+
+            const parsed = issues.map(issue => {
+              const body = issue.body || '';
+              const pkg = body.match(/\*\*Package\*\*\s*\|\s*`([^`]+)`/)?.[1];
+              const cve = body.match(/\*\*CVE\*\*\s*\|\s*(\S+)/)?.[1];
+              const forestParent = body.match(/\*\*Forest Admin parent\*\*\s*\|\s*`([^`]+)`/)?.[1];
+              const severity = body.match(/\*\*Severity\*\*\s*\|\s*(\S+)/)?.[1];
+              const patchedVersion = body.match(/\*\*Patched version\*\*\s*\|\s*([^\s|]+)/)?.[1];
+              const epssRaw = body.match(/\*\*EPSS\*\*\s*\|\s*([0-9.]+)/)?.[1];
+              const sla = body.match(/\*\*SLA\*\*\s*\|\s*(\d+)\s*days?/)?.[1];
+              const createdAt = issue.created_at;
+
+              return {
+                issue_number: issue.number,
+                title: issue.title,
+                pkg,
+                cve,
+                severity: severity || 'high',
+                forest_parent: forestParent,
+                patched_version: patchedVersion || '',
+                epss: epssRaw || '',
+                sla_days: sla || '',
+                created_at: createdAt,
+              };
+            }).filter(i => i.pkg && i.forest_parent);
+
+            core.setOutput('issues', JSON.stringify(parsed));
+            core.setOutput('has_issues', (parsed.length > 0).toString());
+            core.info(`Found ${parsed.length} blocked upstream issues`);
+
+  # ──────────────────────────────────────────────
+  # Step 2: Check each issue for upstream fixes
+  # ──────────────────────────────────────────────
+  check-and-fix:
+    needs: find-issues
+    if: needs.find-issues.outputs.has_issues == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        issue: ${{ fromJson(needs.find-issues.outputs.issues) }}
+      max-parallel: 2
+      fail-fast: false
+    concurrency:
+      group: upstream-fix-${{ matrix.issue.issue_number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Detect package manager
+        id: pm
+        env:
+          INPUT_PM: ${{ inputs.package_manager }}
+        run: |
+          PM="$INPUT_PM"
+          if [ -z "$PM" ]; then
+            if [ -f yarn.lock ]; then
+              PM="yarn"
+            elif [ -f pnpm-lock.yaml ]; then
+              PM="pnpm"
+            else
+              PM="npm"
+            fi
+          fi
+          echo "manager=$PM" >> "$GITHUB_OUTPUT"
+          echo "Detected package manager: $PM"
+
+      - name: Install dependencies
+        env:
+          PM: ${{ steps.pm.outputs.manager }}
+        run: |
+          if [ "$PM" = "yarn" ]; then
+            yarn install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts --no-audit
+          fi
+
+      - name: Check if upstream fix is available
+        id: check
+        env:
+          PM: ${{ steps.pm.outputs.manager }}
+          FOREST_PARENT: ${{ matrix.issue.forest_parent }}
+          VULNERABLE_PKG: ${{ matrix.issue.pkg }}
+          PATCHED_VERSION: ${{ matrix.issue.patched_version }}
+        run: |
+          # Get currently installed version (works with any package manager)
+          CURRENT_VERSION=$(node -e "
+            try { console.log(require(process.env.FOREST_PARENT + '/package.json').version); }
+            catch(e) { }
+          " 2>/dev/null)
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Could not determine current version of $FOREST_PARENT"
+            echo "fixed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Get latest available version from the registry
+          LATEST_VERSION=$(npm view "$FOREST_PARENT" version 2>/dev/null || true)
+
+          if [ -z "$LATEST_VERSION" ] || [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+            echo "No new version of $FOREST_PARENT (current: $CURRENT_VERSION)"
+            echo "fixed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New version available: $FOREST_PARENT $CURRENT_VERSION -> $LATEST_VERSION"
+
+          # Determine lockfile for reset
+          if [ "$PM" = "yarn" ]; then
+            LOCKFILE="yarn.lock"
+          else
+            LOCKFILE="package-lock.json"
+          fi
+
+          # Tentatively update the Forest Admin parent
+          if [ "$PM" = "yarn" ]; then
+            yarn add "$FOREST_PARENT@$LATEST_VERSION"
+          else
+            npm install "$FOREST_PARENT@$LATEST_VERSION" --save
+          fi
+
+          # Check if the vulnerable transitive dep is now at a safe version
+          RESOLVED=$(node -e "
+            try { console.log(require(process.env.VULNERABLE_PKG + '/package.json').version); }
+            catch(e) { }
+          " 2>/dev/null)
+
+          STILL_VULNERABLE="false"
+          if [ -n "$RESOLVED" ] && [ -n "$PATCHED_VERSION" ]; then
+            # Compare resolved version against patched version
+            export RESOLVED PATCHED_VERSION
+            STILL_VULNERABLE=$(node -e "
+              const r = process.env.RESOLVED.split('.').map(Number);
+              const p = process.env.PATCHED_VERSION.split('.').map(Number);
+              const vulnerable = r[0] < p[0] || (r[0] === p[0] && (r[1] < p[1] || (r[1] === p[1] && r[2] < p[2])));
+              console.log(vulnerable ? 'true' : 'false');
+            " 2>/dev/null || echo "false")
+          fi
+
+          if [ "$STILL_VULNERABLE" = "true" ]; then
+            echo "Updated $FOREST_PARENT but $VULNERABLE_PKG ($RESOLVED) is still below patched version ($PATCHED_VERSION)"
+            echo "fixed=false" >> "$GITHUB_OUTPUT"
+            git checkout -- package.json "$LOCKFILE"
+          else
+            echo "Vulnerability resolved by bumping $FOREST_PARENT to $LATEST_VERSION"
+            echo "fixed=true" >> "$GITHUB_OUTPUT"
+            echo "forest_parent=$FOREST_PARENT" >> "$GITHUB_OUTPUT"
+            echo "new_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+            echo "old_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+            # Reset — let Claude do the clean bump with lint/test
+            git checkout -- package.json "$LOCKFILE"
+          fi
+
+      # ── Claude Code: bump, lint, test, open PR ──
+      - name: Fix with Claude Code
+        if: steps.check.outputs.fixed == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            The Forest Admin package "${{ steps.check.outputs.forest_parent }}" has a new version
+            (${{ steps.check.outputs.old_version }} → ${{ steps.check.outputs.new_version }})
+            that resolves a security vulnerability in "${{ matrix.issue.pkg }}"
+            (${{ matrix.issue.cve }}).
+
+            IMPORTANT: Before applying the bump, you MUST investigate what changed.
+            Security bumps have caused production incidents before (e.g. qs restricting
+            array sizes, saml-passport changing certificate validation). Be thorough.
+
+            Please follow these steps in order:
+
+            ## Phase 1 — Investigate the change
+
+            1. Look up the CHANGELOG, release notes, or GitHub releases for
+               ${{ steps.check.outputs.forest_parent }} between version
+               ${{ steps.check.outputs.old_version }} and ${{ steps.check.outputs.new_version }}.
+            2. Also check the changelog for the transitive dependency "${{ matrix.issue.pkg }}"
+               that had the actual vulnerability.
+            3. Identify ANY behavioral changes, not just the security fix:
+               - New default values (e.g. stricter limits, shorter timeouts)
+               - Changed or removed APIs
+               - Modified validation rules or parsing behavior
+               - Deprecated options that are now enforced
+            4. Search the codebase for usages of both ${{ steps.check.outputs.forest_parent }}
+               and ${{ matrix.issue.pkg }} to understand how they are used.
+
+            ## Phase 2 — Apply the bump
+
+            5. Bump ${{ steps.check.outputs.forest_parent }} to ${{ steps.check.outputs.new_version }}.
+            6. Regenerate the lockfile using the project's package manager (see CLAUDE.md).
+
+            ## Phase 3 — Validate thoroughly
+
+            7. Run the linter and fix any issues.
+            8. Run the formatter and fix any issues.
+            9. Run the full test suite.
+            10. If tests pass, check whether the behavioral changes you found in Phase 1
+                are actually covered by existing tests. If a behavioral change is NOT
+                covered (e.g. a new default limit that no test exercises), flag it
+                explicitly in the PR description under a "## Behavioral changes to verify
+                manually" section.
+
+            ## Phase 4 — Open PR
+
+            11. Create a branch named "security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}"
+            12. Commit with message: "fix(deps): bump ${{ steps.check.outputs.forest_parent }} to ${{ steps.check.outputs.new_version }} [${{ matrix.issue.cve }}]"
+            13. Push and open a PR with the "security" label.
+
+            The PR description MUST include:
+            - Closes #${{ matrix.issue.issue_number }}
+            - A summary of what the CVE is about
+            - The version change (old → new) for both the parent and transitive dep
+            - A list of all behavioral changes found in Phase 1
+            - A "## Behavioral changes to verify manually" section listing any
+              changes not covered by tests, with concrete scenarios to check
+            - If no behavioral changes beyond the security fix, state that explicitly
+
+            If the bump causes breaking changes you cannot fully resolve,
+            open the PR anyway with a clear description of what remains broken.
+
+            Refer to CLAUDE.md at the repo root for project-specific conventions.
+
+      # ── Close the tracking issue ──
+      - name: Close tracking issue
+        if: steps.check.outputs.fixed == 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ matrix.issue.issue_number }}
+          FOREST_PARENT: ${{ steps.check.outputs.forest_parent }}
+          NEW_VERSION: ${{ steps.check.outputs.new_version }}
+        with:
+          script: |
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER, 10);
+            const parent = process.env.FOREST_PARENT;
+            const newVersion = process.env.NEW_VERSION;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `✅ Upstream fix available: \`${parent}@${newVersion}\`. A PR has been opened automatically.`,
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed',
+              state_reason: 'completed',
+            });
+
+      # ── Flag stale issues (SLA based on EPSS) ──
+      - name: Flag stale issue
+        if: steps.check.outputs.fixed == 'false'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ matrix.issue.issue_number }}
+          CREATED_AT: ${{ matrix.issue.created_at }}
+          DEFAULT_STALE_DAYS: ${{ inputs.stale_days }}
+          SLA_DAYS: ${{ matrix.issue.sla_days }}
+          EPSS: ${{ matrix.issue.epss }}
+        with:
+          script: |
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER, 10);
+            const createdAt = new Date(process.env.CREATED_AT);
+            const defaultStaleDays = parseInt(process.env.DEFAULT_STALE_DAYS, 10);
+            const epss = parseFloat(process.env.EPSS) || 0;
+
+            // Use EPSS-based SLA if available, otherwise fall back to default
+            let staleDays = defaultStaleDays;
+            if (process.env.SLA_DAYS) {
+              staleDays = parseInt(process.env.SLA_DAYS, 10);
+            } else if (epss > 0.7) {
+              staleDays = 3;
+            } else if (epss > 0.4) {
+              staleDays = 7;
+            }
+
+            const now = new Date();
+            const ageInDays = Math.floor((now - createdAt) / (1000 * 60 * 60 * 24));
+
+            if (ageInDays >= staleDays) {
+              // Check if we already added the stale label
+              const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+
+              if (!labels.some(l => l.name === 'stale-upstream')) {
+                // Ensure label exists
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: 'stale-upstream',
+                    color: 'e4e669',
+                    description: 'Upstream fix has been pending for too long',
+                  });
+                } catch (e) {
+                  // Label may already exist
+                }
+
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  labels: ['stale-upstream'],
+                });
+
+                const slaNote = epss > 0
+                  ? ` SLA was **${staleDays} days** based on EPSS score of ${epss}.`
+                  : '';
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body: `⚠️ This vulnerability has been waiting for an upstream fix for **${ageInDays} days**.${slaNote} Consider escalating with the Forest Admin package maintainers or finding an alternative workaround.`,
+                });
+              }
+            }

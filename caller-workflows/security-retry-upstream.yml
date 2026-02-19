@@ -1,0 +1,21 @@
+# Copy this file to each repo: .github/workflows/security-retry-upstream.yml
+#
+# Thin caller workflow — all logic lives in forestadmin/.github
+
+name: Retry upstream vulnerabilities
+
+on:
+  schedule:
+    - cron: "0 8 * * 1-5" # Weekdays at 8am UTC
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  retry:
+    uses: forestadmin/.github/.github/workflows/retry-upstream-vulnerabilities.yml@main
+    with:
+      # Uncomment to override defaults:
+      # default_assignee_team: forestadmin/platform
+      # node_version: '22'
+      # stale_days: 14
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

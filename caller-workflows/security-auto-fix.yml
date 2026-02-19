@@ -1,0 +1,29 @@
+# Copy this file to each repo: .github/workflows/security-auto-fix.yml
+#
+# Thin caller workflow — all logic lives in forestadmin/.github
+
+name: Security auto-fix
+
+on:
+  dependabot_alert:
+    types: [created]
+
+jobs:
+  fix:
+    if: >
+      (github.event.alert.security_vulnerability.severity == 'high' ||
+       github.event.alert.security_vulnerability.severity == 'critical') &&
+      github.event.alert.dependency.scope != 'development'
+    uses: forestadmin/.github/.github/workflows/fix-vulnerability.yml@main
+    with:
+      package_name: ${{ github.event.alert.security_vulnerability.package.name }}
+      cve_id: ${{ github.event.alert.security_advisory.cve_id }}
+      severity: ${{ github.event.alert.security_vulnerability.severity }}
+      patched_version: ${{ github.event.alert.security_vulnerability.first_patched_version.identifier }}
+      vulnerable_range: ${{ github.event.alert.security_vulnerability.vulnerable_version_range }}
+      summary: ${{ github.event.alert.security_advisory.summary }}
+      # Uncomment to override defaults:
+      # default_assignee_team: forestadmin/platform
+      # node_version: '22'
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
