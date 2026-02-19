@@ -1,0 +1,81 @@
+# forestadmin/.github/.github/workflows/notify-slack-security-pr.yml
+#
+# Reusable workflow: send a Slack notification when a security PR is labeled.
+# Posts to the specified channel and mentions the specified user group.
+
+name: Notify Slack on security PR (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      slack_channel_id:
+        description: "Slack channel ID to post to"
+        type: string
+        required: true
+      slack_usergroup_id:
+        description: "Slack user group ID to mention (e.g. @first_level_support)"
+        type: string
+        required: true
+      security_label:
+        description: "Label name for security PRs"
+        type: string
+        default: ":lock: security"
+      pr_title:
+        description: "Pull request title"
+        type: string
+        required: true
+      pr_url:
+        description: "Pull request URL"
+        type: string
+        required: true
+      pr_author:
+        description: "Pull request author login"
+        type: string
+        required: true
+      repo:
+        description: "Repository full name (owner/repo)"
+        type: string
+        required: true
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          USERGROUP_ID: ${{ inputs.slack_usergroup_id }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_URL: ${{ inputs.pr_url }}
+          PR_AUTHOR: ${{ inputs.pr_author }}
+          REPO: ${{ inputs.repo }}
+        run: |
+          curl -sf -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg channel "$CHANNEL_ID" \
+              --arg usergroup "$USERGROUP_ID" \
+              --arg text ":rotating_light: Security PR opened on $REPO — $PR_TITLE" \
+              --arg pr_title "$PR_TITLE" \
+              --arg pr_url "$PR_URL" \
+              --arg pr_author "$PR_AUTHOR" \
+              --arg repo "$REPO" \
+              '{
+                channel: $channel,
+                text: $text,
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ":rotating_light: *Security PR needs review* <!subteam^\($usergroup)>\n\n*<\($pr_url)|\($pr_title)>*\nRepo: `\($repo)` | Author: `\($pr_author)`"
+                    }
+                  }
+                ]
+              }'
+            )"

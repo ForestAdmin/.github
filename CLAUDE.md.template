@@ -27,7 +27,7 @@
 - Branch naming for security fixes: `security/fix-<package>-<cve-id>`
 - Commit style: conventional commits
   - Example: `fix(deps): bump lodash to 4.17.21 [CVE-2021-23337]`
-- PRs for security fixes must have the `security` label
+- PRs for security fixes must have the `:lock: security` label
 
 ## Dependency bumps
 

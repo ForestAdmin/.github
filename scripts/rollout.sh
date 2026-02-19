@@ -39,6 +39,7 @@ WORKFLOWS=(
   "security-auto-fix.yml"
   "security-retry-upstream.yml"
   "security-notify-downstream.yml"
+  "security-slack-notify.yml"
 )
 
 echo "🔒 Security workflow rollout"

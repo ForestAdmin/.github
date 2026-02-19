@@ -30,6 +30,10 @@ on:
         description: "Days before an issue is considered stale (for notifications)"
         type: number
         default: 14
+      security_label:
+        description: "Label name for security issues/PRs"
+        type: string
+        default: ":lock: security"
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -52,12 +56,15 @@ jobs:
       - name: Find blocked upstream issues
         id: find
         uses: actions/github-script@v7
+        env:
+          SECURITY_LABEL: ${{ inputs.security_label }}
         with:
           script: |
+            const securityLabel = process.env.SECURITY_LABEL;
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              labels: 'security,blocked-upstream',
+              labels: `${securityLabel},blocked-upstream`,
               state: 'open',
               per_page: 50,
             });
@@ -270,7 +277,7 @@ jobs:
 
             11. Create a branch named "security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}"
             12. Commit with message: "fix(deps): bump ${{ steps.check.outputs.forest_parent }} to ${{ steps.check.outputs.new_version }} [${{ matrix.issue.cve }}]"
-            13. Push and open a PR with the "security" label.
+            13. Push and open a PR with the "${{ inputs.security_label }}" label.
 
             The PR description MUST include:
             - Closes #${{ matrix.issue.issue_number }}

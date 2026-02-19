@@ -46,6 +46,7 @@ opens PR         │
 | `fix-vulnerability.yml` | `dependabot_alert` | Fetch EPSS, analyze dependency chain, either fix with Claude Code or open tracking issue |
 | `retry-upstream-vulnerabilities.yml` | Scheduled (cron) / dispatch | Check blocked issues daily (or on upstream notification), auto-fix when upstream ships |
 | `notify-downstream.yml` | Security PR merged | Notify downstream repos to immediately retry blocked issues |
+| `notify-slack-security-pr.yml` | Security PR labeled | Send Slack notification to a channel with user group mention |
 
 ### Setup for a new repository
 
@@ -63,6 +64,7 @@ opens PR         │
    - `security-auto-fix.yml`
    - `security-retry-upstream.yml`
    - `security-notify-downstream.yml` (for repos with downstream dependents)
+   - `security-slack-notify.yml`
 
 2. **Configure `security-notify-downstream.yml`** in repos that have downstream dependents. Set `downstream_repos` to the list of repos that depend on this repo's packages:
    - `agent-nodejs` → `'["forestadmin-server"]'`
@@ -71,7 +73,7 @@ opens PR         │
 3. **Add a `CLAUDE.md`** to the repo root using `CLAUDE.md.template` as a starting point. Customize the lint/test/format commands for your project.
 
 4. **Ensure required labels exist** in the repo:
-   - `security`
+   - `:lock: security`
    - `blocked-upstream`
 
 5. **Verify secrets** (see below).
@@ -87,6 +89,7 @@ Caller workflows can override these defaults via `with:` inputs:
 | `node_version` | `22` | Node.js version for CI |
 | `package_manager` | _(auto-detected)_ | Package manager: `npm`, `yarn`. Auto-detected from lockfile if omitted |
 | `stale_days` | `14` | Default days before a blocked issue is flagged stale (overridden by EPSS-based SLA) |
+| `security_label` | `:lock: security` | Label name for security issues/PRs |
 
 ### EPSS integration
 
@@ -108,6 +111,7 @@ This requires a `CROSS_REPO_TOKEN` secret with `actions:write` permission on the
 |--------|-------|-------------|
 | `ANTHROPIC_API_KEY` | Org-level | API key for Claude Code |
 | `CROSS_REPO_TOKEN` | Org-level | PAT or GitHub App token with `actions:write` on downstream repos (for cross-repo dispatch) |
+| `SLACK_BOT_TOKEN` | Org-level | Slack bot token with `chat:write` permission (for PR notifications) |
 
 Set them at the org level:
 
@@ -124,11 +128,13 @@ forestadmin/.github/
 │   └── workflows/
 │       ├── fix-vulnerability.yml              # Reusable: fix or track vulnerabilities
 │       ├── retry-upstream-vulnerabilities.yml  # Reusable: daily retry for upstream fixes
-│       └── notify-downstream.yml              # Reusable: cross-repo dispatch on fix merge
+│       ├── notify-downstream.yml              # Reusable: cross-repo dispatch on fix merge
+│       └── notify-slack-security-pr.yml       # Reusable: Slack notification on security PR
 ├── caller-workflows/
 │   ├── security-auto-fix.yml                  # Copy to each repo
 │   ├── security-retry-upstream.yml            # Copy to each repo
-│   └── security-notify-downstream.yml         # Copy to repos with downstream dependents
+│   ├── security-notify-downstream.yml         # Copy to repos with downstream dependents
+│   └── security-slack-notify.yml              # Copy to each repo
 ├── scripts/
 │   └── rollout.sh                             # Deploy caller workflows to repos
 ├── CLAUDE.md.template                         # Template for repo-level CLAUDE.md

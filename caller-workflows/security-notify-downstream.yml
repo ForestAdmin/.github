@@ -19,7 +19,7 @@ jobs:
   notify:
     if: >
       github.event.pull_request.merged == true &&
-      contains(github.event.pull_request.labels.*.name, 'security')
+      contains(github.event.pull_request.labels.*.name, ':lock: security')
     uses: forestadmin/.github/.github/workflows/notify-downstream.yml@main
     with:
       # Configure downstream repos that depend on this repo's packages.

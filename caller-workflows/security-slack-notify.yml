@@ -1,0 +1,27 @@
+# Copy this file to each repo: .github/workflows/security-slack-notify.yml
+#
+# Notifies Slack when a security PR is labeled.
+# Customize slack_channel_id and slack_usergroup_id for your team.
+#
+# Requires:
+#   - SLACK_BOT_TOKEN secret (bot with chat:write permission)
+
+name: Notify Slack on security PR
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  notify:
+    if: github.event.label.name == ':lock: security'
+    uses: forestadmin/.github/.github/workflows/notify-slack-security-pr.yml@main
+    with:
+      slack_channel_id: GAZF5Q5RV
+      slack_usergroup_id: S09SUAY74TD
+      pr_title: ${{ github.event.pull_request.title }}
+      pr_url: ${{ github.event.pull_request.html_url }}
+      pr_author: ${{ github.event.pull_request.user.login }}
+      repo: ${{ github.repository }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
