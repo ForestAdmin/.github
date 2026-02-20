@@ -235,12 +235,15 @@ jobs:
         env:
           BRANCH: security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}
         run: |
+          # Ensure we have main ref (shallow clone may not include it)
+          git fetch --depth=1 origin main
+          # Reuse existing remote branch if it exists, otherwise create new
           if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
             git fetch origin "$BRANCH"
             git checkout "$BRANCH"
             git reset --hard origin/main
           else
-            git checkout -b "$BRANCH"
+            git checkout -b "$BRANCH" origin/main
           fi
 
       # ── Claude Code: bump, lint, test ──
