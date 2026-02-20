@@ -358,6 +358,7 @@ jobs:
           FOREST_PARENT: ${{ steps.check.outputs.forest_parent }}
           NEW_VERSION: ${{ steps.check.outputs.new_version }}
           CVE: ${{ matrix.issue.cve }}
+          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -370,7 +371,12 @@ jobs:
             exit 1
           fi
           git commit -m "fix(deps): bump $FOREST_PARENT to $NEW_VERSION [$CVE]"
-          git push --force-with-lease origin "$BRANCH"
+          # Push with REPO_TOKEN explicitly — claude-code-action overwrites the
+          # git credentials set by actions/checkout, causing the push to use
+          # GITHUB_TOKEN which doesn't trigger CI workflows.
+          git push --force-with-lease \
+            "https://x-access-token:${REPO_TOKEN}@github.com/${{ github.repository }}.git" \
+            "$BRANCH"
 
       # ── Create or update PR ──
       - name: Create or update PR
