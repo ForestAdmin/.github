@@ -271,10 +271,15 @@ jobs:
             - Patched version: ${{ matrix.issue.patched_version }}
 
             ## Environment
+            - Node.js ${{ inputs.node_version }} is already installed. Do NOT install or switch Node versions.
             - Dependencies are already installed (yarn install was run).
             - NPM_TOKEN is set — use `yarn` commands directly.
             - Do NOT create branches, commit, push, or open PRs. The workflow handles git.
             - Do NOT use subagents/Task tool — work directly.
+            - Do NOT add new dependencies or devDependencies (no patch-package, no postinstall scripts).
+            - Do NOT create new files or directories (no patches/ dir, no shims).
+            - You MAY modify existing source files (.ts, .js) if the bump introduces breaking
+              changes (renamed exports, changed APIs, etc.). Adapt the code to the new version.
 
             ## Steps
 
@@ -338,6 +343,13 @@ jobs:
 
             Refer to CLAUDE.md for project conventions.
 
+      # ── Save Claude output ──
+      - name: Save Claude output to file
+        if: steps.check.outputs.fixed == 'true'
+        env:
+          CLAUDE_OUTPUT: ${{ steps.claude.outputs.result }}
+        run: printf '%s' "$CLAUDE_OUTPUT" > /tmp/claude-output.txt
+
       # ── Commit and push ──
       - name: Commit and push
         if: steps.check.outputs.fixed == 'true'
@@ -371,11 +383,10 @@ jobs:
           CVE: ${{ matrix.issue.cve }}
           SEVERITY: ${{ matrix.issue.severity }}
           SECURITY_LABEL: ${{ inputs.security_label }}
-          CLAUDE_OUTPUT: ${{ steps.claude.outputs.result }}
           ISSUE_NUMBER: ${{ matrix.issue.issue_number }}
         run: |
-          # Extract PR description from Claude's output, or use a default
-          PR_BODY=$(echo "$CLAUDE_OUTPUT" | sed -n '/<pr-description>/,/<\/pr-description>/p' | sed '1d;$d' || true)
+          # Extract PR description from Claude's output file
+          PR_BODY=$(sed -n '/<pr-description>/,/<\/pr-description>/p' /tmp/claude-output.txt | sed '1d;$d' || true)
           if [ -z "$PR_BODY" ]; then
             PR_BODY="## Security fix: bump $FOREST_PARENT to $NEW_VERSION [$CVE]
 
@@ -385,7 +396,7 @@ jobs:
 
           Automated security bump by Claude Code.
 
-          $CLAUDE_OUTPUT"
+          $(cat /tmp/claude-output.txt)"
           fi
 
           PR_TITLE="fix(deps): bump $FOREST_PARENT to $NEW_VERSION [$CVE]"
