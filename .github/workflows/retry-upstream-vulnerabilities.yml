@@ -37,6 +37,9 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: true
+      REPO_TOKEN:
+        description: "PAT or App token with repo write access (pushes from GITHUB_TOKEN don't trigger CI)"
+        required: true
 
 permissions:
   contents: write
@@ -115,6 +118,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.REPO_TOKEN }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -142,7 +147,7 @@ jobs:
           PM: ${{ steps.pm.outputs.manager }}
         run: |
           if [ "$PM" = "yarn" ]; then
-            yarn install --frozen-lockfile --ignore-scripts
+            NPM_TOKEN=dummy yarn install --frozen-lockfile --ignore-engines 2>&1 || true
           else
             npm ci --ignore-scripts --no-audit
           fi
@@ -187,7 +192,7 @@ jobs:
 
           # Tentatively update the Forest Admin parent
           if [ "$PM" = "yarn" ]; then
-            yarn add "$FOREST_PARENT@$LATEST_VERSION"
+            NPM_TOKEN=dummy yarn add "$FOREST_PARENT@$LATEST_VERSION" --ignore-engines
           else
             npm install "$FOREST_PARENT@$LATEST_VERSION" --save
           fi
@@ -224,74 +229,180 @@ jobs:
             git checkout -- package.json "$LOCKFILE"
           fi
 
-      # ── Claude Code: bump, lint, test, open PR ──
+      # ── Checkout or create security branch ──
+      - name: Checkout security branch
+        if: steps.check.outputs.fixed == 'true'
+        env:
+          BRANCH: security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}
+        run: |
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git reset --hard origin/main
+          else
+            git checkout -b "$BRANCH"
+          fi
+
+      # ── Claude Code: bump, lint, test ──
       - name: Fix with Claude Code
         if: steps.check.outputs.fixed == 'true'
+        id: claude
         uses: anthropics/claude-code-action@v1
+        env:
+          NPM_TOKEN: dummy
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          direct_prompt: |
-            The Forest Admin package "${{ steps.check.outputs.forest_parent }}" has a new version
-            (${{ steps.check.outputs.old_version }} → ${{ steps.check.outputs.new_version }})
-            that resolves a security vulnerability in "${{ matrix.issue.pkg }}"
-            (${{ matrix.issue.cve }}).
+          github_token: ${{ github.token }}
+          show_full_output: true
+          claude_args: "--dangerously-skip-permissions"
+          prompt: |
+            Fix a security vulnerability by bumping a Forest Admin dependency.
 
-            IMPORTANT: Before applying the bump, you MUST investigate what changed.
-            Security bumps have caused production incidents before (e.g. qs restricting
-            array sizes, saml-passport changing certificate validation). Be thorough.
+            ## Vulnerability info
+            - Forest Admin parent package: ${{ steps.check.outputs.forest_parent }}
+            - Current version: ${{ steps.check.outputs.old_version }}
+            - New version: ${{ steps.check.outputs.new_version }}
+            - Vulnerable transitive dep: ${{ matrix.issue.pkg }}
+            - CVE: ${{ matrix.issue.cve }}
+            - Severity: ${{ matrix.issue.severity }}
+            - Patched version: ${{ matrix.issue.patched_version }}
 
-            Please follow these steps in order:
+            ## Environment
+            - Dependencies are already installed (yarn install was run).
+            - NPM_TOKEN is set — use `yarn` commands directly.
+            - Do NOT create branches, commit, push, or open PRs. The workflow handles git.
+            - Do NOT use subagents/Task tool — work directly.
 
-            ## Phase 1 — Investigate the change
+            ## Steps
 
-            1. Look up the CHANGELOG, release notes, or GitHub releases for
-               ${{ steps.check.outputs.forest_parent }} between version
-               ${{ steps.check.outputs.old_version }} and ${{ steps.check.outputs.new_version }}.
-            2. Also check the changelog for the transitive dependency "${{ matrix.issue.pkg }}"
-               that had the actual vulnerability.
-            3. Identify ANY behavioral changes, not just the security fix:
-               - New default values (e.g. stricter limits, shorter timeouts)
-               - Changed or removed APIs
-               - Modified validation rules or parsing behavior
-               - Deprecated options that are now enforced
-            4. Search the codebase for usages of both ${{ steps.check.outputs.forest_parent }}
-               and ${{ matrix.issue.pkg }} to understand how they are used.
+            ### 1. Investigate (keep it focused)
+            - Check the GitHub releases or CHANGELOG for ${{ steps.check.outputs.forest_parent }}
+              between ${{ steps.check.outputs.old_version }} and ${{ steps.check.outputs.new_version }}.
+              Use a single WebFetch to the releases page — do NOT download and diff
+              multiple package tarballs.
+            - Also check the changelog for "${{ matrix.issue.pkg }}" (the vulnerable transitive dep).
+            - Search the codebase for direct usages: `grep -r "${{ steps.check.outputs.forest_parent }}" --include="*.ts" --include="*.js" -l`
+            - Identify ANY behavioral changes (new defaults, removed APIs, changed validation).
 
-            ## Phase 2 — Apply the bump
+            ### 2. Apply the fix
+            This is a monorepo. Prefer making changes in the child package that uses the
+            dependency. Only modify the root package.json as a last resort.
 
-            5. Bump ${{ steps.check.outputs.forest_parent }} to ${{ steps.check.outputs.new_version }}.
-            6. Regenerate the lockfile using the project's package manager (see CLAUDE.md).
+            **Priority order:**
+            1. **Direct dependency in a child package.json** — bump the version there.
+            2. **Transitive dependency of a child package** — add a `"resolutions"` entry
+               in that child's package.json. Example:
+               ```json
+               "resolutions": {
+                 "${{ matrix.issue.pkg }}": ">=${{ matrix.issue.patched_version }}"
+               }
+               ```
+            3. **No clear child owner (used by multiple packages or only at root)** —
+               add the `"resolutions"` entry in the root package.json.
 
-            ## Phase 3 — Validate thoroughly
+            If a `"resolutions"` field already exists, add to it — do NOT replace it.
+            - IMPORTANT: You MUST modify a package.json. Lockfile-only changes are NOT acceptable
+              because they get overwritten on the next `yarn install`.
+            - Run `yarn install --ignore-engines` to regenerate the lockfile.
+            - Verify the new version is installed: `yarn list ${{ matrix.issue.pkg }}`
+            - Verify a package.json was actually modified (it must be in the diff).
 
-            7. Run the linter and fix any issues.
-            8. Run the formatter and fix any issues.
-            9. Run the full test suite.
-            10. If tests pass, check whether the behavioral changes you found in Phase 1
-                are actually covered by existing tests. If a behavioral change is NOT
-                covered (e.g. a new default limit that no test exercises), flag it
-                explicitly in the PR description under a "## Behavioral changes to verify
-                manually" section.
+            ### 3. Validate
+            - Run `yarn lint` and fix any issues.
+            - Run `yarn test` and fix any issues.
 
-            ## Phase 4 — Open PR
+            ### 4. Output summary
+            When done, output exactly this format:
 
-            11. Create a branch named "security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}"
-            12. Commit with message: "fix(deps): bump ${{ steps.check.outputs.forest_parent }} to ${{ steps.check.outputs.new_version }} [${{ matrix.issue.cve }}]"
-            13. Push and open a PR with the "${{ inputs.security_label }}" label.
+            <pr-description>
+            ## Security: bump ${{ steps.check.outputs.forest_parent }} (${{ steps.check.outputs.old_version }} → ${{ steps.check.outputs.new_version }}) [${{ matrix.issue.cve }}]
 
-            The PR description MUST include:
-            - Closes #${{ matrix.issue.issue_number }}
-            - A summary of what the CVE is about
-            - The version change (old → new) for both the parent and transitive dep
-            - A list of all behavioral changes found in Phase 1
-            - A "## Behavioral changes to verify manually" section listing any
-              changes not covered by tests, with concrete scenarios to check
-            - If no behavioral changes beyond the security fix, state that explicitly
+            Closes #${{ matrix.issue.issue_number }}
 
-            If the bump causes breaking changes you cannot fully resolve,
-            open the PR anyway with a clear description of what remains broken.
+            **CVE**: ${{ matrix.issue.cve }}
+            **Severity**: ${{ matrix.issue.severity }}
+            **Summary**: Vulnerability in ${{ matrix.issue.pkg }} fixed by bumping ${{ steps.check.outputs.forest_parent }}
 
-            Refer to CLAUDE.md at the repo root for project-specific conventions.
+            ### Changes made
+            (describe what you changed — which files, resolution vs direct bump)
+
+            ### Behavioral changes
+            (list any non-security behavioral changes, or "None beyond the security fix")
+
+            ### Behavioral changes to verify manually
+            (list changes not covered by tests, or "All changes covered by tests")
+            </pr-description>
+
+            Refer to CLAUDE.md for project conventions.
+
+      # ── Commit and push ──
+      - name: Commit and push
+        if: steps.check.outputs.fixed == 'true'
+        env:
+          BRANCH: security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}
+          FOREST_PARENT: ${{ steps.check.outputs.forest_parent }}
+          NEW_VERSION: ${{ steps.check.outputs.new_version }}
+          CVE: ${{ matrix.issue.cve }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json yarn.lock package-lock.json pnpm-lock.yaml 2>/dev/null || true
+          git add '*/package.json' 2>/dev/null || true
+          git add -u  # stage modifications to already-tracked files only
+          git reset -- '*.log' 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 1
+          fi
+          git commit -m "fix(deps): bump $FOREST_PARENT to $NEW_VERSION [$CVE]"
+          git push --force-with-lease origin "$BRANCH"
+
+      # ── Create or update PR ──
+      - name: Create or update PR
+        if: steps.check.outputs.fixed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.REPO_TOKEN }}
+          BRANCH: security/fix-${{ matrix.issue.pkg }}-${{ matrix.issue.cve }}
+          FOREST_PARENT: ${{ steps.check.outputs.forest_parent }}
+          NEW_VERSION: ${{ steps.check.outputs.new_version }}
+          CVE: ${{ matrix.issue.cve }}
+          SEVERITY: ${{ matrix.issue.severity }}
+          SECURITY_LABEL: ${{ inputs.security_label }}
+          CLAUDE_OUTPUT: ${{ steps.claude.outputs.result }}
+          ISSUE_NUMBER: ${{ matrix.issue.issue_number }}
+        run: |
+          # Extract PR description from Claude's output, or use a default
+          PR_BODY=$(echo "$CLAUDE_OUTPUT" | sed -n '/<pr-description>/,/<\/pr-description>/p' | sed '1d;$d' || true)
+          if [ -z "$PR_BODY" ]; then
+            PR_BODY="## Security fix: bump $FOREST_PARENT to $NEW_VERSION [$CVE]
+
+          Closes #$ISSUE_NUMBER
+
+          Severity: **$SEVERITY**
+
+          Automated security bump by Claude Code.
+
+          $CLAUDE_OUTPUT"
+          fi
+
+          PR_TITLE="fix(deps): bump $FOREST_PARENT to $NEW_VERSION [$CVE]"
+
+          # Check if a PR already exists for this branch
+          EXISTING_PR=$(gh pr view "$BRANCH" --json number --jq '.number' 2>/dev/null || true)
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Updating existing PR #$EXISTING_PR"
+            gh pr edit "$EXISTING_PR" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY"
+            gh pr comment "$EXISTING_PR" --body "🔄 Re-ran security fix workflow — PR updated with new changes."
+          else
+            gh pr create \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              --label "$SECURITY_LABEL" \
+              --head "$BRANCH"
+          fi
 
       # ── Close the tracking issue ──
       - name: Close tracking issue

@@ -9,6 +9,11 @@ on:
     - cron: "0 8 * * 1-5" # Weekdays at 8am UTC
   workflow_dispatch: # Allow manual trigger
 
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
 jobs:
   retry:
     uses: forestadmin/.github/.github/workflows/retry-upstream-vulnerabilities.yml@main
@@ -19,3 +24,4 @@ jobs:
       # stale_days: 14
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
