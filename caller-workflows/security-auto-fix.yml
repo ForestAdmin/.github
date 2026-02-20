@@ -53,3 +53,4 @@ jobs:
       # node_version: '22'
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
