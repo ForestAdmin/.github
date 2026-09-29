@@ -1,0 +1,157 @@
+# forestadmin/.github/.github/workflows/notify-ci-failure.yml
+#
+# Reusable workflow: notify Slack when a workflow fails on the main branch.
+# Meant to be called from a `workflow_run` trigger. Lives in this public repo so
+# that public repositories can call it (they cannot call reusable workflows from
+# private repositories).
+
+name: Notify CI failure on main (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      slack_channel_id:
+        description: "Slack channel ID to post to"
+        type: string
+        required: true
+      workflow_name:
+        description: "Name of the workflow that ran (github.event.workflow_run.name)"
+        type: string
+        required: true
+      run_url:
+        description: "URL of the workflow run (github.event.workflow_run.html_url)"
+        type: string
+        required: true
+      conclusion:
+        description: "Conclusion of the run (github.event.workflow_run.conclusion)"
+        type: string
+        required: true
+      head_branch:
+        description: "Branch the run was triggered on (github.event.workflow_run.head_branch)"
+        type: string
+        required: true
+      event:
+        description: "Event that triggered the run (github.event.workflow_run.event)"
+        type: string
+        required: true
+      head_sha:
+        description: "Commit sha of the run (github.event.workflow_run.head_sha)"
+        type: string
+        required: true
+      author:
+        description: "Commit author name (github.event.workflow_run.head_commit.author.name)"
+        type: string
+        default: ""
+      commit_message:
+        description: "Commit message (github.event.workflow_run.head_commit.message)"
+        type: string
+        default: ""
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # `event` excludes pull requests, including a fork PR whose branch is named `main`.
+    if: >-
+      inputs.head_branch == 'main' &&
+      contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), inputs.event) &&
+      contains(fromJSON('["failure", "timed_out", "startup_failure"]'), inputs.conclusion)
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          RUN_URL: ${{ inputs.run_url }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          AUTHOR: ${{ inputs.author }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          COMMIT_TITLE=$(printf '%s' "$COMMIT_MESSAGE" | head -n1)
+          # Slack rejects a section field over 2000 characters, prefix included, and escaping
+          # can grow a character fivefold, so the cap is taken before it.
+          MAX_FIELD_CHARS=300
+          MAX_ATTEMPTS=4
+          DEFAULT_RETRY_DELAY=5
+          MAX_RETRY_DELAY=30
+          COMMIT_URL="$SERVER_URL/$REPO/commit/$HEAD_SHA"
+
+          payload=$(jq -n \
+            --arg channel "$CHANNEL_ID" \
+            --arg workflow "$WORKFLOW_NAME" \
+            --arg run_url "$RUN_URL" \
+            --arg repo "$REPO" \
+            --arg sha "${HEAD_SHA:0:7}" \
+            --arg commit_url "$COMMIT_URL" \
+            --arg author "$AUTHOR" \
+            --arg title "$COMMIT_TITLE" \
+            --argjson max "$MAX_FIELD_CHARS" \
+            'def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+            ($workflow[:$max] | esc) as $workflow
+            | ($author[:$max] | esc) as $author
+            | ($title[:$max] | esc) as $title
+            | {
+              channel: $channel,
+              text: ":x: CI failed on main: \($workflow) (\($repo))",
+              attachments: [{
+                color: "danger",
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ":x: *CI failed on main*\nA CI workflow has failed on the main branch and requires attention."
+                    },
+                    fields: [
+                      {type: "mrkdwn", text: "*Workflow*\n\($workflow)", verbatim: true},
+                      {type: "mrkdwn", text: "*Repository*\n\($repo)"},
+                      {type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($sha)`>"},
+                      {type: "mrkdwn", text: "*Author*\n\($author)", verbatim: true},
+                      {type: "mrkdwn", text: "*Commit message*\n\($title)", verbatim: true}
+                    ]
+                  },
+                  {
+                    type: "actions",
+                    elements: [
+                      {type: "button", text: {type: "plain_text", text: "View run"}, url: $run_url, style: "danger"},
+                      {type: "button", text: {type: "plain_text", text: "View commit"}, url: $commit_url}
+                    ]
+                  }
+                ]
+              }]
+            }')
+
+          headers=$(mktemp)
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            response=$(curl -sS -D "$headers" -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data "$payload") || response=""
+
+            if [ "$(echo "$response" | jq -r '.ok' 2>/dev/null)" = "true" ]; then
+              echo "Slack notification sent"
+              exit 0
+            fi
+
+            error=$(echo "$response" | jq -r '.error // empty' 2>/dev/null || true)
+            error=${error:-no valid response}
+            if [ "$error" != "ratelimited" ] || [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+              break
+            fi
+
+            delay=$(awk 'tolower($1) == "retry-after:" {print $2}' "$headers" | tr -d '\r' | tail -n1)
+            case "$delay" in ''|*[!0-9]*) delay=$DEFAULT_RETRY_DELAY ;; esac
+            if [ "$delay" -gt "$MAX_RETRY_DELAY" ]; then delay=$MAX_RETRY_DELAY; fi
+            echo "Rate limited by Slack, retrying in ${delay}s (attempt $attempt of $MAX_ATTEMPTS)"
+            sleep "$delay"
+          done
+
+          echo "Failed to send Slack notification: $error"
+          exit 1
