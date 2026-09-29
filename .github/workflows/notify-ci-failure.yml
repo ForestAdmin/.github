@@ -1,0 +1,76 @@
+# forestadmin/.github/.github/workflows/notify-ci-failure.yml
+#
+# Reusable workflow: notify Slack when a workflow fails on the main branch.
+# Meant to be called from a `workflow_run` trigger. Lives in this public repo so
+# that public repositories can call it (they cannot call reusable workflows from
+# private repositories).
+
+name: Notify CI failure on main (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      slack_channel_id:
+        description: "Slack channel ID to post to"
+        type: string
+        required: true
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: contains(fromJSON('["failure", "stale", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          AUTHOR: ${{ github.event.workflow_run.head_commit.author.name }}
+          COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          COMMIT_TITLE=$(printf '%s' "$COMMIT_MESSAGE" | head -n1)
+          COMMIT_URL="$SERVER_URL/$REPO/commit/$HEAD_SHA"
+
+          payload=$(jq -n \
+            --arg channel "$CHANNEL_ID" \
+            --arg workflow "$WORKFLOW_NAME" \
+            --arg run_url "$RUN_URL" \
+            --arg repo "$REPO" \
+            --arg sha "${HEAD_SHA:0:7}" \
+            --arg commit_url "$COMMIT_URL" \
+            --arg author "$AUTHOR" \
+            --arg title "$COMMIT_TITLE" \
+            '{
+              channel: $channel,
+              text: ":x: CI failed on main: \($workflow) (\($repo))",
+              attachments: [{
+                color: "danger",
+                title: ":x: CI Failed on Main Branch",
+                title_link: $run_url,
+                text: "A CI workflow has failed on the main branch and requires attention.",
+                fields: [
+                  {title: "Workflow", value: $workflow, short: true},
+                  {title: "Repository", value: $repo, short: true},
+                  {title: "Commit", value: "<\($commit_url)|`\($sha)`>", short: true},
+                  {title: "Author", value: $author, short: true},
+                  {title: "Commit Message", value: $title, short: false}
+                ]
+              }]
+            }')
+
+          response=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data "$payload")
+
+          if [ "$(echo "$response" | jq -r '.ok')" != "true" ]; then
+            echo "Failed to send Slack notification: $(echo "$response" | jq -r '.error')"
+            exit 1
+          fi
