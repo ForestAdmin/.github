@@ -14,26 +14,63 @@ on:
         description: "Slack channel ID to post to"
         type: string
         required: true
+      workflow_name:
+        description: "Name of the workflow that ran (github.event.workflow_run.name)"
+        type: string
+        required: true
+      run_url:
+        description: "URL of the workflow run (github.event.workflow_run.html_url)"
+        type: string
+        required: true
+      conclusion:
+        description: "Conclusion of the run (github.event.workflow_run.conclusion)"
+        type: string
+        required: true
+      head_branch:
+        description: "Branch the run was triggered on (github.event.workflow_run.head_branch)"
+        type: string
+        required: true
+      event:
+        description: "Event that triggered the run (github.event.workflow_run.event)"
+        type: string
+        required: true
+      head_sha:
+        description: "Commit sha of the run (github.event.workflow_run.head_sha)"
+        type: string
+        required: true
+      author:
+        description: "Commit author name (github.event.workflow_run.head_commit.author.name)"
+        type: string
+        default: ""
+      commit_message:
+        description: "Commit message (github.event.workflow_run.head_commit.message)"
+        type: string
+        default: ""
     secrets:
       SLACK_BOT_TOKEN:
         required: true
 
+permissions: {}
+
 jobs:
   notify:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # `event` excludes pull requests, including a fork PR whose branch is named `main`.
     if: >-
-      github.event.workflow_run.head_branch == 'main' &&
-      contains(fromJSON('["failure", "stale", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
+      inputs.head_branch == 'main' &&
+      contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), inputs.event) &&
+      contains(fromJSON('["failure", "timed_out", "startup_failure"]'), inputs.conclusion)
     steps:
       - name: Send Slack notification
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           CHANNEL_ID: ${{ inputs.slack_channel_id }}
-          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          AUTHOR: ${{ github.event.workflow_run.head_commit.author.name }}
-          COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          RUN_URL: ${{ inputs.run_url }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          AUTHOR: ${{ inputs.author }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
           REPO: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
         run: |
@@ -54,15 +91,28 @@ jobs:
               text: ":x: CI failed on main: \($workflow) (\($repo))",
               attachments: [{
                 color: "danger",
-                title: ":x: CI Failed on Main Branch",
-                title_link: $run_url,
-                text: "A CI workflow has failed on the main branch and requires attention.",
-                fields: [
-                  {title: "Workflow", value: $workflow, short: true},
-                  {title: "Repository", value: $repo, short: true},
-                  {title: "Commit", value: "<\($commit_url)|`\($sha)`>", short: true},
-                  {title: "Author", value: $author, short: true},
-                  {title: "Commit Message", value: $title, short: false}
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ":x: *CI failed on main*\nA CI workflow has failed on the main branch and requires attention."
+                    },
+                    fields: [
+                      {type: "mrkdwn", text: "*Workflow*\n\($workflow)"},
+                      {type: "mrkdwn", text: "*Repository*\n\($repo)"},
+                      {type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($sha)`>"},
+                      {type: "mrkdwn", text: "*Author*\n\($author)"},
+                      {type: "mrkdwn", text: "*Commit message*\n\($title)"}
+                    ]
+                  },
+                  {
+                    type: "actions",
+                    elements: [
+                      {type: "button", text: {type: "plain_text", text: "View run"}, url: $run_url, style: "danger"},
+                      {type: "button", text: {type: "plain_text", text: "View commit"}, url: $commit_url}
+                    ]
+                  }
                 ]
               }]
             }')
