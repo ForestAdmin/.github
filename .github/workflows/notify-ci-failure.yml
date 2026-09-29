@@ -75,6 +75,8 @@ jobs:
           SERVER_URL: ${{ github.server_url }}
         run: |
           COMMIT_TITLE=$(printf '%s' "$COMMIT_MESSAGE" | head -n1)
+          # Slack rejects a section field over 2000 characters, prefix included.
+          MAX_TITLE=500
           COMMIT_URL="$SERVER_URL/$REPO/commit/$HEAD_SHA"
 
           payload=$(jq -n \
@@ -86,6 +88,7 @@ jobs:
             --arg commit_url "$COMMIT_URL" \
             --arg author "$AUTHOR" \
             --arg title "$COMMIT_TITLE" \
+            --argjson max_title "$MAX_TITLE" \
             '{
               channel: $channel,
               text: ":x: CI failed on main: \($workflow) (\($repo))",
@@ -103,7 +106,7 @@ jobs:
                       {type: "mrkdwn", text: "*Repository*\n\($repo)"},
                       {type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($sha)`>"},
                       {type: "mrkdwn", text: "*Author*\n\($author)"},
-                      {type: "mrkdwn", text: "*Commit message*\n\($title)"}
+                      {type: "mrkdwn", text: "*Commit message*\n\($title[:$max_title])"}
                     ]
                   },
                   {
@@ -117,7 +120,7 @@ jobs:
               }]
             }')
 
-          response=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+          response=$(curl -sS --retry 3 --retry-max-time 60 -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H "Content-Type: application/json; charset=utf-8" \
             --data "$payload")
