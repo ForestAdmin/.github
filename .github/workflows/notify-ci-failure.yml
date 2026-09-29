@@ -76,7 +76,10 @@ jobs:
         run: |
           COMMIT_TITLE=$(printf '%s' "$COMMIT_MESSAGE" | head -n1)
           # Slack rejects a section field over 2000 characters, prefix included.
-          MAX_TITLE=500
+          MAX_FIELD_CHARS=500
+          MAX_ATTEMPTS=4
+          DEFAULT_RETRY_DELAY=5
+          MAX_RETRY_DELAY=30
           COMMIT_URL="$SERVER_URL/$REPO/commit/$HEAD_SHA"
 
           payload=$(jq -n \
@@ -88,7 +91,7 @@ jobs:
             --arg commit_url "$COMMIT_URL" \
             --arg author "$AUTHOR" \
             --arg title "$COMMIT_TITLE" \
-            --argjson max_title "$MAX_TITLE" \
+            --argjson max "$MAX_FIELD_CHARS" \
             '{
               channel: $channel,
               text: ":x: CI failed on main: \($workflow) (\($repo))",
@@ -102,11 +105,11 @@ jobs:
                       text: ":x: *CI failed on main*\nA CI workflow has failed on the main branch and requires attention."
                     },
                     fields: [
-                      {type: "mrkdwn", text: "*Workflow*\n\($workflow)"},
+                      {type: "mrkdwn", text: "*Workflow*\n\($workflow[:$max])"},
                       {type: "mrkdwn", text: "*Repository*\n\($repo)"},
                       {type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($sha)`>"},
-                      {type: "mrkdwn", text: "*Author*\n\($author)"},
-                      {type: "mrkdwn", text: "*Commit message*\n\($title[:$max_title])"}
+                      {type: "mrkdwn", text: "*Author*\n\($author[:$max])"},
+                      {type: "mrkdwn", text: "*Commit message*\n\($title[:$max])"}
                     ]
                   },
                   {
@@ -120,12 +123,30 @@ jobs:
               }]
             }')
 
-          response=$(curl -sS --retry 3 --retry-max-time 60 -X POST https://slack.com/api/chat.postMessage \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json; charset=utf-8" \
-            --data "$payload")
+          headers=$(mktemp)
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            response=$(curl -sS -D "$headers" -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data "$payload") || response=""
 
-          if [ "$(echo "$response" | jq -r '.ok')" != "true" ]; then
-            echo "Failed to send Slack notification: $(echo "$response" | jq -r '.error')"
-            exit 1
-          fi
+            if [ "$(echo "$response" | jq -r '.ok' 2>/dev/null)" = "true" ]; then
+              echo "Slack notification sent"
+              exit 0
+            fi
+
+            error=$(echo "$response" | jq -r '.error // empty' 2>/dev/null || true)
+            error=${error:-no valid response}
+            if [ "$error" != "ratelimited" ] || [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+              break
+            fi
+
+            delay=$(awk 'tolower($1) == "retry-after:" {print $2}' "$headers" | tr -d '\r' | tail -n1)
+            case "$delay" in ''|*[!0-9]*) delay=$DEFAULT_RETRY_DELAY ;; esac
+            if [ "$delay" -gt "$MAX_RETRY_DELAY" ]; then delay=$MAX_RETRY_DELAY; fi
+            echo "Rate limited by Slack, retrying in ${delay}s (attempt $attempt of $MAX_ATTEMPTS)"
+            sleep "$delay"
+          done
+
+          echo "Failed to send Slack notification: $error"
+          exit 1
