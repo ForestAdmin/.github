@@ -75,8 +75,9 @@ jobs:
           SERVER_URL: ${{ github.server_url }}
         run: |
           COMMIT_TITLE=$(printf '%s' "$COMMIT_MESSAGE" | head -n1)
-          # Slack rejects a section field over 2000 characters, prefix included.
-          MAX_FIELD_CHARS=500
+          # Slack rejects a section field over 2000 characters, prefix included, and escaping
+          # can grow a character fivefold, so the cap is taken before it.
+          MAX_FIELD_CHARS=300
           MAX_ATTEMPTS=4
           DEFAULT_RETRY_DELAY=5
           MAX_RETRY_DELAY=30
@@ -92,7 +93,11 @@ jobs:
             --arg author "$AUTHOR" \
             --arg title "$COMMIT_TITLE" \
             --argjson max "$MAX_FIELD_CHARS" \
-            '{
+            'def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+            ($workflow[:$max] | esc) as $workflow
+            | ($author[:$max] | esc) as $author
+            | ($title[:$max] | esc) as $title
+            | {
               channel: $channel,
               text: ":x: CI failed on main: \($workflow) (\($repo))",
               attachments: [{
@@ -105,11 +110,11 @@ jobs:
                       text: ":x: *CI failed on main*\nA CI workflow has failed on the main branch and requires attention."
                     },
                     fields: [
-                      {type: "mrkdwn", text: "*Workflow*\n\($workflow[:$max])"},
+                      {type: "mrkdwn", text: "*Workflow*\n\($workflow)", verbatim: true},
                       {type: "mrkdwn", text: "*Repository*\n\($repo)"},
                       {type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($sha)`>"},
-                      {type: "mrkdwn", text: "*Author*\n\($author[:$max])"},
-                      {type: "mrkdwn", text: "*Commit message*\n\($title[:$max])"}
+                      {type: "mrkdwn", text: "*Author*\n\($author)", verbatim: true},
+                      {type: "mrkdwn", text: "*Commit message*\n\($title)", verbatim: true}
                     ]
                   },
                   {
