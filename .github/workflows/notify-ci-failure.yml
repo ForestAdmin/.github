@@ -21,7 +21,9 @@ on:
 jobs:
   notify:
     runs-on: ubuntu-latest
-    if: contains(fromJSON('["failure", "stale", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
+    if: >-
+      github.event.workflow_run.head_branch == 'main' &&
+      contains(fromJSON('["failure", "stale", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
     steps:
       - name: Send Slack notification
         env:
